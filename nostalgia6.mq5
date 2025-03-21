@@ -71,11 +71,12 @@ input bool short_entry_condition_9_enable = true;
 input bool short_entry_condition_10_enable = true;
 
 // Trade management inputs
-input double base_lot_size = 0.1;     // Base lot size for trades
+input double base_lot_size = 0.1;     // Base lot size (will be adjusted dynamically)
 input double grinding_factor = 0.24;  // Lot size increment for grinding
 input double derisk_loss = -0.24;     // Loss threshold for de-risking (account currency per lot)
 input double profit_target = 0.05;    // Default profit target (5% price movement)
 input double stop_loss = 0.05;        // Default stop loss (5% price movement)
+input double risk_percent = 1.0;      // Risk percentage of equity per trade (e.g., 1%)
 
 // **Indicator Parameters**
 input int ema_fast_period = 12;       // Fast EMA period
@@ -89,6 +90,7 @@ input int ewo_fast_period = 5;        // EWO fast EMA
 input int ewo_slow_period = 35;       // EWO slow EMA
 
 // **Indicator Handles**
+// (All indicator handles remain unchanged)
 // 5-minute timeframe
 int ema_fast_handle_5m, ema_slow_handle_5m, ema_200_handle_5m;
 int rsi_handle_5m, cci_handle_5m, sma_50_handle_5m, sma_200_handle_5m;
@@ -174,6 +176,40 @@ void OnInit()
 void OnDeinit(const int reason)
 {
    // No specific cleanup needed
+}
+
+// **New Function: Calculate Lot Size Based on Risk**
+double CalculateLotSize(double price, double sl_distance)
+{
+   double account_equity = AccountEquity();
+   double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TICK_SIZE);
+   double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TICK_VALUE);
+   double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   // Calculate risk amount (e.g., 1% of equity)
+   double risk_amount = account_equity * (risk_percent / 100.0);
+   // Calculate pip value and risk in pips
+   double pip_value = tick_value / tick_size;
+   double risk_pips = sl_distance / tick_size;
+   // Calculate lot size
+   double lot_size = risk_amount / (risk_pips * pip_value);
+   // Normalize lot size to allowed steps
+   lot_size = MathFloor(lot_size / lot_step) * lot_step;
+   lot_size = MathMax(min_lot, MathMin(max_lot, lot_size));
+
+   return lot_size;
+}
+
+// **New Function: Check Margin Availability**
+bool CheckMargin(double lot_size, double price, ENUM_ORDER_TYPE order_type)
+{
+   double margin_required;
+   if (!OrderCalcMargin(order_type, _Symbol, lot_size, price, margin_required))
+      return false;
+   double free_margin = AccountFreeMargin();
+   return (free_margin > margin_required);
 }
 
 // **Custom Indicator Functions**
@@ -304,7 +340,7 @@ void CheckSellConditions()
       ulong ticket = PositionGetTicket(i);
       if (PositionSelectByTicket(ticket))
       {
-         double open_price = PositionGetDouble(POSITION_PRICE_OPEN); // Fixed undeclared identifier errors
+         double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
          double current_price = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 
                                 SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
                                 SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -336,17 +372,24 @@ void GrindingLogic()
       ulong ticket = PositionGetTicket(0);
       if (PositionSelectByTicket(ticket))
       {
-         double open_price = PositionGetDouble(POSITION_PRICE_OPEN); // Fixed undeclared identifier
-         double volume = PositionGetDouble(POSITION_VOLUME);         // Fixed undeclared identifier
+         double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+         double volume = PositionGetDouble(POSITION_VOLUME);
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double sl_price, tp_price;
+
          if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
          {
             double loss_ratio = (bid - open_price) / open_price;
             if (loss_ratio < -0.12)
             {
                double new_lot = volume + grinding_factor;
-               trade.Buy(new_lot, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target));
+               sl_price = ask * (1 - stop_loss);
+               tp_price = ask * (1 + profit_target);
+               if (CheckMargin(new_lot, ask, ORDER_TYPE_BUY))
+               {
+                  trade.Buy(new_lot, NULL, ask, sl_price, tp_price);
+               }
             }
          }
          else if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
@@ -355,7 +398,12 @@ void GrindingLogic()
             if (loss_ratio < -0.12)
             {
                double new_lot = volume + grinding_factor;
-               trade.Sell(new_lot, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target));
+               sl_price = bid * (1 + stop_loss);
+               tp_price = bid * (1 - profit_target);
+               if (CheckMargin(new_lot, bid, ORDER_TYPE_SELL))
+               {
+                  trade.Sell(new_lot, NULL, bid, sl_price, tp_price);
+               }
             }
          }
       }
@@ -369,8 +417,8 @@ void DeRiskingLogic()
       ulong ticket = PositionGetTicket(i);
       if (PositionSelectByTicket(ticket))
       {
-         double profit = PositionGetDouble(POSITION_PROFIT);   // Fixed undeclared identifier
-         double volume = PositionGetDouble(POSITION_VOLUME);   // Fixed undeclared identifier
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         double volume = PositionGetDouble(POSITION_VOLUME);
          double loss_threshold = derisk_loss * volume;
          if (profit < loss_threshold)
          {
@@ -409,142 +457,144 @@ void OnTick()
    
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl_distance = stop_loss * ask; // Approximate SL distance in price units
+   double lot_size = CalculateLotSize(ask, sl_distance);
 
    // Check long and short entries
    if (PositionsTotal() == 0)
    {
       // Long entries
-      if (CheckLongEntryCondition1())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 1");
-      else if (CheckLongEntryCondition2())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 2");
-      else if (CheckLongEntryCondition3())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 3");
-      else if (CheckLongEntryCondition4())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 4");
-      else if (CheckLongEntryCondition5())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 5");
-      else if (CheckLongEntryCondition6())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 6");
-      else if (CheckLongEntryCondition7())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 7");
-      else if (CheckLongEntryCondition8())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 8");
-      else if (CheckLongEntryCondition9())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 9");
-      else if (CheckLongEntryCondition10())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 10");
-      else if (CheckLongEntryCondition11())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 11");
-      else if (CheckLongEntryCondition12())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 12");
-      else if (CheckLongEntryCondition13())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 13");
-      else if (CheckLongEntryCondition14())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 14");
-      else if (CheckLongEntryCondition15())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 15");
-      else if (CheckLongEntryCondition16())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 16");
-      else if (CheckLongEntryCondition17())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 17");
-      else if (CheckLongEntryCondition18())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 18");
-      else if (CheckLongEntryCondition19())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 19");
-      else if (CheckLongEntryCondition20())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 20");
-      else if (CheckLongEntryCondition21())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 21");
-      else if (CheckLongEntryCondition22())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 22");
-      else if (CheckLongEntryCondition23())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 23");
-      else if (CheckLongEntryCondition24())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 24");
-      else if (CheckLongEntryCondition25())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 25");
-      else if (CheckLongEntryCondition26())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 26");
-      else if (CheckLongEntryCondition27())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 27");
-      else if (CheckLongEntryCondition28())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 28");
-      else if (CheckLongEntryCondition29())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 29");
-      else if (CheckLongEntryCondition30())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 30");
-      else if (CheckLongEntryCondition31())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 31");
-      else if (CheckLongEntryCondition32())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 32");
-      else if (CheckLongEntryCondition33())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 33");
-      else if (CheckLongEntryCondition34())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 34");
-      else if (CheckLongEntryCondition35())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 35");
-      else if (CheckLongEntryCondition36())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 36");
-      else if (CheckLongEntryCondition37())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 37");
-      else if (CheckLongEntryCondition38())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 38");
-      else if (CheckLongEntryCondition39())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 39");
-      else if (CheckLongEntryCondition40())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 40");
-      else if (CheckLongEntryCondition41())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 41");
-      else if (CheckLongEntryCondition42())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 42");
-      else if (CheckLongEntryCondition43())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 43");
-      else if (CheckLongEntryCondition44())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 44");
-      else if (CheckLongEntryCondition45())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 45");
-      else if (CheckLongEntryCondition46())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 46");
-      else if (CheckLongEntryCondition47())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 47");
-      else if (CheckLongEntryCondition48())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 48");
-      else if (CheckLongEntryCondition49())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 49");
-      else if (CheckLongEntryCondition50())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 50");
-      else if (CheckLongEntryCondition51())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 51");
-      else if (CheckLongEntryCondition52())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 52");
-      else if (CheckLongEntryCondition53())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 53");
-      else if (CheckLongEntryCondition54())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 54");
-      else if (CheckLongEntryCondition55())
-         trade.Buy(base_lot_size, NULL, 0, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 55");
+      if (CheckLongEntryCondition1() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 1");
+      else if (CheckLongEntryCondition2() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 2");
+      else if (CheckLongEntryCondition3() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 3");
+      else if (CheckLongEntryCondition4() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 4");
+      else if (CheckLongEntryCondition5() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 5");
+      else if (CheckLongEntryCondition6() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 6");
+      else if (CheckLongEntryCondition7() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 7");
+      else if (CheckLongEntryCondition8() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 8");
+      else if (CheckLongEntryCondition9() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 9");
+      else if (CheckLongEntryCondition10() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 10");
+      else if (CheckLongEntryCondition11() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 11");
+      else if (CheckLongEntryCondition12() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 12");
+      else if (CheckLongEntryCondition13() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 13");
+      else if (CheckLongEntryCondition14() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 14");
+      else if (CheckLongEntryCondition15() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 15");
+      else if (CheckLongEntryCondition16() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 16");
+      else if (CheckLongEntryCondition17() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 17");
+      else if (CheckLongEntryCondition18() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 18");
+      else if (CheckLongEntryCondition19() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 19");
+      else if (CheckLongEntryCondition20() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 20");
+      else if (CheckLongEntryCondition21() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 21");
+      else if (CheckLongEntryCondition22() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 22");
+      else if (CheckLongEntryCondition23() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 23");
+      else if (CheckLongEntryCondition24() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 24");
+      else if (CheckLongEntryCondition25() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 25");
+      else if (CheckLongEntryCondition26() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 26");
+      else if (CheckLongEntryCondition27() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 27");
+      else if (CheckLongEntryCondition28() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 28");
+      else if (CheckLongEntryCondition29() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 29");
+      else if (CheckLongEntryCondition30() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 30");
+      else if (CheckLongEntryCondition31() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 31");
+      else if (CheckLongEntryCondition32() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 32");
+      else if (CheckLongEntryCondition33() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 33");
+      else if (CheckLongEntryCondition34() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 34");
+      else if (CheckLongEntryCondition35() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 35");
+      else if (CheckLongEntryCondition36() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 36");
+      else if (CheckLongEntryCondition37() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 37");
+      else if (CheckLongEntryCondition38() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 38");
+      else if (CheckLongEntryCondition39() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 39");
+      else if (CheckLongEntryCondition40() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 40");
+      else if (CheckLongEntryCondition41() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 41");
+      else if (CheckLongEntryCondition42() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 42");
+      else if (CheckLongEntryCondition43() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 43");
+      else if (CheckLongEntryCondition44() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 44");
+      else if (CheckLongEntryCondition45() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 45");
+      else if (CheckLongEntryCondition46() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 46");
+      else if (CheckLongEntryCondition47() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 47");
+      else if (CheckLongEntryCondition48() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 48");
+      else if (CheckLongEntryCondition49() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 49");
+      else if (CheckLongEntryCondition50() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 50");
+      else if (CheckLongEntryCondition51() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 51");
+      else if (CheckLongEntryCondition52() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 52");
+      else if (CheckLongEntryCondition53() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 53");
+      else if (CheckLongEntryCondition54() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 54");
+      else if (CheckLongEntryCondition55() && CheckMargin(lot_size, ask, ORDER_TYPE_BUY))
+         trade.Buy(lot_size, NULL, ask, ask * (1 - stop_loss), ask * (1 + profit_target), "Long Entry 55");
       // Short entries
-      else if (CheckShortEntryCondition1())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 1");
-      else if (CheckShortEntryCondition2())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 2");
-      else if (CheckShortEntryCondition3())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 3");
-      else if (CheckShortEntryCondition4())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 4");
-      else if (CheckShortEntryCondition5())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 5");
-      else if (CheckShortEntryCondition6())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 6");
-      else if (CheckShortEntryCondition7())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 7");
-      else if (CheckShortEntryCondition8())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 8");
-      else if (CheckShortEntryCondition9())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 9");
-      else if (CheckShortEntryCondition10())
-         trade.Sell(base_lot_size, NULL, 0, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 10");
+      else if (CheckShortEntryCondition1() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 1");
+      else if (CheckShortEntryCondition2() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 2");
+      else if (CheckShortEntryCondition3() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 3");
+      else if (CheckShortEntryCondition4() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 4");
+      else if (CheckShortEntryCondition5() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 5");
+      else if (CheckShortEntryCondition6() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 6");
+      else if (CheckShortEntryCondition7() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 7");
+      else if (CheckShortEntryCondition8() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 8");
+      else if (CheckShortEntryCondition9() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 9");
+      else if (CheckShortEntryCondition10() && CheckMargin(lot_size, bid, ORDER_TYPE_SELL))
+         trade.Sell(lot_size, NULL, bid, bid * (1 + stop_loss), bid * (1 - profit_target), "Short Entry 10");
    }
 
    // Manage open trades
