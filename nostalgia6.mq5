@@ -181,9 +181,9 @@ void OnDeinit(const int reason)
 // **New Function: Calculate Lot Size Based on Risk**
 double CalculateLotSize(double price, double sl_distance)
 {
-   double account_equity = AccountEquity();
-   double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TICK_SIZE);
-   double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TICK_VALUE);
+   double account_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -208,7 +208,7 @@ bool CheckMargin(double lot_size, double price, ENUM_ORDER_TYPE order_type)
    double margin_required;
    if (!OrderCalcMargin(order_type, _Symbol, lot_size, price, margin_required))
       return false;
-   double free_margin = AccountFreeMargin();
+   double free_margin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
    return (free_margin > margin_required);
 }
 
