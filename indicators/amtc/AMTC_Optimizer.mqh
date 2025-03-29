@@ -1,27 +1,29 @@
-// # AMTC_Optimizer.mqh
+//+------------------------------------------------------------------+
+//|                      AMTC_Optimizer.mqh                          |
+//+------------------------------------------------------------------+
 #ifndef AMTC_OPTIMIZER_MQH
 #define AMTC_OPTIMIZER_MQH
 
-// # Genetic Algorithm Parameter Optimization
-void OptimizeParameters(int &basePeriod) {
+// Genetic Algorithm Parameter Optimization
+void OptimizeParameters(int &shortPeriod, int &mediumPeriod, int &longPeriod) {
    const int populationSize = 10;
    const int generations = 5;
-   double population[], fitness[];
+   double population[][3], fitness[];
    ArrayResize(population, populationSize);
    ArrayResize(fitness, populationSize);
 
    // Initialize population
    for(int i = 0; i < populationSize; i++) {
-      population[i] = basePeriod * (0.5 + i * 0.1);
+      population[i][0] = shortPeriod * (0.5 + i * 0.1);
+      population[i][1] = mediumPeriod * (0.5 + i * 0.1);
+      population[i][2] = longPeriod * (0.5 + i * 0.1);
    }
 
    // Evolutionary loop
    for(int gen = 0; gen < generations; gen++) {
-      // Evaluate fitness (simplified Sharpe ratio proxy)
       for(int i = 0; i < populationSize; i++) {
-         double period = population[i];
-         double returns = SimulateReturns(period); // Mock simulation
-         fitness[i] = returns / (period * 0.01); // Reward shorter periods with good returns
+         double returns = SimulateReturns(population[i][0], population[i][1], population[i][2]);
+         fitness[i] = returns / ((population[i][0] + population[i][1] + population[i][2]) * 0.01);
       }
 
       // Selection and crossover
@@ -30,18 +32,24 @@ void OptimizeParameters(int &basePeriod) {
       for(int i = 0; i < populationSize; i += 2) {
          int parent1 = SelectParent(fitness);
          int parent2 = SelectParent(fitness);
-         newPopulation[i] = population[parent1] * 0.5 + population[parent2] * 0.5;
-         if(i + 1 < populationSize) {
-            newPopulation[i + 1] = population[parent1] * 0.7 + population[parent2] * 0.3;
+         for(int j = 0; j < 3; j++) {
+            newPopulation[i][j] = population[parent1][j] * 0.5 + population[parent2][j] * 0.5;
+            if(i + 1 < populationSize) {
+               newPopulation[i + 1][j] = population[parent1][j] * 0.7 + population[parent2][j] * 0.3;
+            }
          }
       }
 
       // Mutation
       for(int i = 0; i < populationSize; i++) {
          if(MathRand() / 32767.0 < 0.1) {
-            newPopulation[i] += (MathRand() / 32767.0 - 0.5) * basePeriod * 0.2;
+            for(int j = 0; j < 3; j++) {
+               newPopulation[i][j] += (MathRand() / 32767.0 - 0.5) * (j == 0 ? shortPeriod : (j == 1 ? mediumPeriod : longPeriod)) * 0.2;
+            }
          }
-         newPopulation[i] = MathMax(5, MathMin(basePeriod * 2, newPopulation[i]));
+         newPopulation[i][0] = MathMax(5, MathMin(shortPeriod * 2, newPopulation[i][0]));
+         newPopulation[i][1] = MathMax(5, MathMin(mediumPeriod * 2, newPopulation[i][1]));
+         newPopulation[i][2] = MathMax(5, MathMin(longPeriod * 2, newPopulation[i][2]));
       }
       ArrayCopy(population, newPopulation);
    }
@@ -51,18 +59,27 @@ void OptimizeParameters(int &basePeriod) {
    for(int i = 1; i < populationSize; i++) {
       if(fitness[i] > fitness[bestIdx]) bestIdx = i;
    }
-   basePeriod = (int)population[bestIdx];
+   shortPeriod = (int)population[bestIdx][0];
+   mediumPeriod = (int)population[bestIdx][1];
+   longPeriod = (int)population[bestIdx][2];
 }
 
-// # Simulate returns for fitness evaluation
-double SimulateReturns(double period) {
+// Simulate returns for fitness evaluation
+double SimulateReturns(double shortPeriod, double mediumPeriod, double longPeriod) {
    double price[];
    if(CopyClose(_Symbol, _Period, 0, 100, price) < 100) return 0.0;
    double sumReturns = 0.0;
    for(int i = 1; i < 100; i++) {
-      double hma = CalculateHMA(price, i, (int)period, 100);
-      double prevHma = CalculateHMA(price, i - 1, (int)period, 100);
-      sumReturns += (hma > prevHma) ? (price[i] - price[i-1]) : 0;
+      double hmaShort = CalculateHMA(price, i, (int)shortPeriod, 100);
+      double hmaMedium = CalculateHMA(price, i, (int)mediumPeriod, 100);
+      double hmaLong = CalculateHMA(price, i, (int)longPeriod, 100);
+      double prevHmaMedium = CalculateHMA(price, i - 1, (int)mediumPeriod, 100);
+      if(hmaShort > hmaMedium && hmaMedium > hmaLong && hmaMedium > prevHmaMedium) {
+         sumReturns += price[i] - price[i-1];
+      }
+      else if(hmaShort < hmaMedium && hmaMedium < hmaLong && hmaMedium < prevHmaMedium) {
+         sumReturns += price[i-1] - price[i];
+      }
    }
    return sumReturns;
 }
