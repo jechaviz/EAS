@@ -4,7 +4,7 @@
 #ifndef AMTC_UTILS_MQH
 #define AMTC_UTILS_MQH
 
-// Calculate Linear Weighted Moving Average (LWMA)
+// LWMA Calculation
 double CalculateLWMA(const double &data[], int bar, int period, int total) {
    if(bar < period - 1 || bar >= total) return(0.0);
    double sum = 0.0, weightSum = period * (period + 1) / 2.0;
@@ -12,7 +12,7 @@ double CalculateLWMA(const double &data[], int bar, int period, int total) {
    return(sum / weightSum);
 }
 
-// Calculate Hull Moving Average (HMA)
+// HMA Calculation
 double CalculateHMA(const double &data[], int bar, int period, int total) {
    if(bar < period + (int)MathSqrt(period) - 1 || bar >= total) return(0.0);
    int halfPeriod = MathMax(2, period / 2);
@@ -25,20 +25,20 @@ double CalculateHMA(const double &data[], int bar, int period, int total) {
    return CalculateLWMA(rawHmaArray, bar, MathMax(2, (int)MathSqrt(period)), total);
 }
 
-// Adjust period based on volatility (ATR)
+// Volatility-adjusted period
 double CalculateAdjustedPeriod(int basePeriod, double atr, double sensitivity) {
    double atrAvg = iMA(NULL, 0, 50, 0, MODE_SMA, iATR(_Symbol, _Period, 14, 0), 0);
    if(atrAvg == 0) return basePeriod;
-   double volatilityFactor = (atr / atrAvg) * sensitivity;
-   return MathMax(5, MathMin(basePeriod * 2, basePeriod * volatilityFactor));
+   double factor = (atr / atrAvg) * sensitivity;
+   return MathMax(5, MathMin(basePeriod * 2, basePeriod * factor));
 }
 
-// Non-linear slope estimation with sigmoid weighting
+// Non-linear slope with sigmoid weighting
 double CalculateNonLinearSlope(const double &hma[], int bar, int period, int total) {
-   if(bar < 1 || bar >= total) return(0.0);
-   double delta = hma[bar] - hma[bar - 1];
-   double sigmoid = 1.0 / (1.0 + MathExp(-delta * 100.0));
-   return delta * (sigmoid - 0.5) * 2.0;
+   if(bar < period || bar >= total) return(0.0);
+   double delta = (hma[bar] - hma[bar - period]) / period;
+   double sigmoid = 1.0 / (1.0 + MathExp(-10.0 * delta));
+   return (sigmoid - 0.5) * 2.0;
 }
 
 // Cross-asset trend consensus
@@ -48,8 +48,8 @@ double CalculateCrossAssetConsensus(int bar, string assets, int total) {
    double consensus = 0.0, weightSum = 0.0;
    for(int i = 0; i < ArraySize(assetList); i++) {
       double price[];
-      if(CopyClose(assetList[i], _Period, bar, 10, price) >= 10) {
-         double slope = (price[0] - price[9]) / 9.0;
+      if(CopyClose(assetList[i], _Period, bar, 30, price) >= 30) {
+         double slope = (price[0] - price[29]) / 29.0;
          double corr = CalculatePearsonCorrelation(_Symbol, assetList[i], bar, total);
          consensus += slope * corr;
          weightSum += MathAbs(corr);
@@ -58,7 +58,7 @@ double CalculateCrossAssetConsensus(int bar, string assets, int total) {
    return weightSum > 0 ? consensus / weightSum : 0.0;
 }
 
-// Calculate Pearson correlation between two symbols
+// Pearson correlation between 2 symbols
 double CalculatePearsonCorrelation(string symbol1, string symbol2, int bar, int total) {
    double p1[], p2[];
    if(CopyClose(symbol1, _Period, bar, 30, p1) < 30 || CopyClose(symbol2, _Period, bar, 30, p2) < 30) return(0.0);
@@ -93,10 +93,23 @@ double CalculateSkewnessAdjustment(const double &price[], int bar, int total) {
    return variance > 0 ? (m3 / 30.0) / MathPow(variance, 1.5) : 0.0;
 }
 
-// Fuzzy logic scores with multi-scale and adjustments
+// Slope variance
+double CalculateSlopeVariance(const double &slope[], int bar, int window, int total) {
+   if(bar < window || bar >= total) return(0.0);
+   double mean = 0.0, variance = 0.0;
+   for(int i = 0; i < window; i++) mean += slope[bar - i];
+   mean /= window;
+   for(int i = 0; i < window; i++) {
+      double dev = slope[bar - i] - mean;
+      variance += dev * dev;
+   }
+   return variance / (window - 1);
+}
+
+// Fuzzy logic consensus with multi-scale and adjustments
 void CalculateFuzzyScores(double slopeShort, double slopeMedium, double slopeLong, double consensus,
                           double skewAdj, double regime, double &upScore, double &downScore, double &flatScore) {
-   double theta = 0.001 * (1 + regime); // Regime-adjusted threshold
+   double theta = 0.001 * (1 + regime);
    double muUpShort = 1.0 / (1.0 + MathExp(-10 * (slopeShort - theta)));
    double muDownShort = 1.0 / (1.0 + MathExp(10 * (slopeShort + theta)));
    double muFlatShort = 1.0 - MathMin(muUpShort, muDownShort);
@@ -107,9 +120,9 @@ void CalculateFuzzyScores(double slopeShort, double slopeMedium, double slopeLon
    double muDownLong = 1.0 / (1.0 + MathExp(10 * (slopeLong + theta)));
    double muFlatLong = 1.0 - MathMin(muUpLong, muDownLong);
 
-   upScore = (muUpShort + muUpMedium + muUpLong) / 3.0 + consensus * 0.2 + skewAdj * 0.1;
-   downScore = (muDownShort + muDownMedium + muDownLong) / 3.0 - consensus * 0.2 - skewAdj * 0.1;
-   flatScore = (muFlatShort + muFlatMedium + muFlatLong) / 3.0;
+   upScore = (muUpShort * 0.3 + muUpMedium * 0.4 + muUpLong * 0.3) + consensus * 0.2 + MathMax(0, skewAdj) * 0.1;
+   downScore = (muDownShort * 0.3 + muDownMedium * 0.4 + muDownLong * 0.3) - consensus * 0.2 + MathMax(0, -skewAdj) * 0.1;
+   flatScore = (muFlatShort * 0.3 + muFlatMedium * 0.4 + muFlatLong * 0.3);
    double total = upScore + downScore + flatScore;
    if(total > 0) {
       upScore /= total;
@@ -121,10 +134,10 @@ void CalculateFuzzyScores(double slopeShort, double slopeMedium, double slopeLon
 // SHAP values for explainability
 void CalculateSHAPValues(double slope, double consensus, double skewAdj, double regime, double &shapValues[]) {
    ArrayResize(shapValues, 4);
-   shapValues[0] = MathAbs(slope) * 100.0 * 0.5;     // Slope contribution
-   shapValues[1] = MathAbs(consensus) * 0.3;         // Consensus contribution
-   shapValues[2] = MathAbs(skewAdj) * 0.2;           // Skewness contribution
-   shapValues[3] = regime * 0.1;                     // Regime contribution
+   shapValues[0] = MathAbs(slope) * 100.0 * 0.5;     // Slope
+   shapValues[1] = MathAbs(consensus) * 0.3;         // Consensus
+   shapValues[2] = MathAbs(skewAdj) * 0.2;           // Skewness
+   shapValues[3] = regime * 0.1;                     // Regime
 }
 
 #endif

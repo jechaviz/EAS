@@ -5,9 +5,9 @@
 //+------------------------------------------------------------------+
 #property copyright "2025, jechaviz"
 #property link      "jechaviz@gmail.com"
-#property version   "3.00"
+#property version   "4.00"
 #property indicator_chart_window
-#property indicator_buffers 8
+#property indicator_buffers 10
 #property indicator_plots   1
 
 // Plot 0: Medium-term HMA with color coding
@@ -28,6 +28,8 @@ input int    Short_Period = 9;             // Short-term base period (min 5)
 input int    Medium_Period = 21;           // Medium-term base period (min 5)
 input int    Long_Period = 50;             // Long-term base period (min 5)
 input double VolatilitySensitivity = 1.0;  // Volatility adjustment (0.5-2.0)
+input double UKF_ProcessNoise = 0.001;     // UKF process noise covariance
+input double UKF_MeasurementNoise = 0.01;  // UKF measurement noise covariance
 input bool   ShowSignals  = true;          // Show buy/sell/flat arrows
 input bool   ShowSHAP     = false;         // Show SHAP dashboard
 input color  UpArrowColor = clrLime;       // Up arrow color
@@ -36,28 +38,27 @@ input color  FlatArrowColor = clrGray;     // Flat arrow color
 input int    ArrowSize    = 1;             // Arrow width (1-5)
 input double ArrowOffsetPoints = 10;       // Arrow offset in points
 input string CorrelatedAssets = "EURUSD,GBPUSD,USDJPY"; // Correlated assets
-input int    ParticleCount = 100;          // Number of particles for filtering (50-500)
 
 // Buffers
-double HmaShort[], HmaMedium[], HmaLong[], HmaColorBuffer[], TrendSlope[], FuzzyUp[], FuzzyDown[], FuzzyFlat[];
+double HmaShort[], HmaMedium[], HmaLong[], HmaColorBuffer[], TrendSlope[], FuzzyUp[], FuzzyDown[], FuzzyFlat[], SlopeVariance[], RegimeBuffer[];
 
 // Global Variables
 int minBarsRequired;
-double particleStates[];
+int atrHandle = INVALID_HANDLE;
 
 // Initialization
 int OnInit() {
-   // Validate inputs
+   // Input validation
    if(Short_Period < 5 || Medium_Period < 5 || Long_Period < 5) {
-      Print("Error: HMA periods must be at least 5");
+      Print("Error: HMA periods must be >= 5");
       return(INIT_PARAMETERS_INCORRECT);
    }
    if(VolatilitySensitivity < 0.5 || VolatilitySensitivity > 2.0) {
       Print("Error: VolatilitySensitivity must be between 0.5 and 2.0");
       return(INIT_PARAMETERS_INCORRECT);
    }
-   if(ParticleCount < 50 || ParticleCount > 500) {
-      Print("Error: ParticleCount must be between 50 and 500");
+   if(UKF_ProcessNoise <= 0 || UKF_MeasurementNoise <= 0) {
+      Print("Error: UKF noise parameters must be positive");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
@@ -70,22 +71,28 @@ int OnInit() {
    SetIndexBuffer(5, FuzzyFlat, INDICATOR_DATA);
    SetIndexBuffer(6, HmaShort, INDICATOR_DATA);
    SetIndexBuffer(7, HmaLong, INDICATOR_DATA);
+   SetIndexBuffer(8, SlopeVariance, INDICATOR_DATA);
+   SetIndexBuffer(9, RegimeBuffer, INDICATOR_DATA);
 
    // Configure plot
    PlotIndexSetString(0, PLOT_LABEL, "AMTC_HMA_Medium");
-   IndicatorSetString(INDICATOR_SHORTNAME, "AMTC v3 (" + IntegerToString(Short_Period) + "," + IntegerToString(Medium_Period) + "," + IntegerToString(Long_Period) + ")");
+   IndicatorSetString(INDICATOR_SHORTNAME, "AMTC v4 (" + IntegerToString(Short_Period) + "," + IntegerToString(Medium_Period) + "," + IntegerToString(Long_Period) + ")");
    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
 
-   // Calculate minimum bars required
+   // Minimum bars required
    minBarsRequired = Long_Period + (int)MathSqrt(Long_Period) + 30;
 
-   // Initialize particle filter and other components
-   ArrayResize(particleStates, ParticleCount);
+   // Initialize components
+   atrHandle = iATR(_Symbol, _Period, 14);
+   if(atrHandle == INVALID_HANDLE) {
+      Print("Error: Failed to initialize ATR");
+      return(INIT_FAILED);
+   }
+   InitUKF(UKF_ProcessNoise, UKF_MeasurementNoise);
    InitHMM();
-   InitUKF();
    OptimizeParameters(Short_Period, Medium_Period, Long_Period);
 
-   Print("Initialized with optimized periods: Short=", Short_Period, ", Medium=", Medium_Period, ", Long=", Long_Period);
+   Print("Initialized AMTC v4 with optimized periods: Short=", Short_Period, ", Medium=", Medium_Period, ", Long=", Long_Period);
    return(INIT_SUCCEEDED);
 }
 
@@ -100,10 +107,7 @@ int OnCalculate(const int rates_total,
                 const long &tick_volume[],
                 const long &volume[],
                 const int &spread[]) {
-   if(rates_total < minBarsRequired) {
-      Print("Insufficient bars: ", rates_total, " < ", minBarsRequired);
-      return(0);
-   }
+   if(rates_total < minBarsRequired) return(0);
 
    // Prepare arrays
    ArraySetAsSeries(close, true);
@@ -118,14 +122,14 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(FuzzyUp, true);
    ArraySetAsSeries(FuzzyDown, true);
    ArraySetAsSeries(FuzzyFlat, true);
+   ArraySetAsSeries(SlopeVariance, true);
+   ArraySetAsSeries(RegimeBuffer, true);
 
-   int atrHandle = iATR(_Symbol, _Period, 14);
-   if(atrHandle == INVALID_HANDLE) {
-      Print("Error: Failed to initialize ATR");
+   double atrArray[];
+   if(CopyBuffer(atrHandle, 0, 0, rates_total, atrArray) < rates_total) {
+      Print("Error: Failed to copy ATR data");
       return(0);
    }
-   double atrArray[];
-   CopyBuffer(atrHandle, 0, 0, rates_total, atrArray);
    ArraySetAsSeries(atrArray, true);
 
    int start = prev_calculated > 0 ? prev_calculated - 1 : minBarsRequired;
@@ -134,47 +138,45 @@ int OnCalculate(const int rates_total,
       // Volatility-adjusted periods
       double atr = atrArray[i];
       if(atr == 0) continue;
-      double adjustedShort = CalculateAdjustedPeriod(Short_Period, atr, VolatilitySensitivity);
-      double adjustedMedium = CalculateAdjustedPeriod(Medium_Period, atr, VolatilitySensitivity);
-      double adjustedLong = CalculateAdjustedPeriod(Long_Period, atr, VolatilitySensitivity);
+      double adjShort = CalculateAdjustedPeriod(Short_Period, atr, VolatilitySensitivity);
+      double adjMedium = CalculateAdjustedPeriod(Medium_Period, atr, VolatilitySensitivity);
+      double adjLong = CalculateAdjustedPeriod(Long_Period, atr, VolatilitySensitivity);
 
-      // Multi-scale HMA calculation
-      HmaShort[i] = CalculateHMA(close, i, (int)adjustedShort, rates_total);
-      HmaMedium[i] = CalculateHMA(close, i, (int)adjustedMedium, rates_total);
-      HmaLong[i] = CalculateHMA(close, i, (int)adjustedLong, rates_total);
+      // Multi-scale HMA
+      HmaShort[i] = CalculateHMA(close, i, (int)adjShort, rates_total);
+      HmaMedium[i] = CalculateHMA(close, i, (int)adjMedium, rates_total);
+      HmaLong[i] = CalculateHMA(close, i, (int)adjLong, rates_total);
 
-      // Non-linear slope estimation
-      double slopeShort = CalculateNonLinearSlope(HmaShort, i, (int)adjustedShort, rates_total);
-      double slopeMedium = CalculateNonLinearSlope(HmaMedium, i, (int)adjustedMedium, rates_total);
-      double slopeLong = CalculateNonLinearSlope(HmaLong, i, (int)adjustedLong, rates_total);
+      // Non-linear slopes
+      double slopeShort = CalculateNonLinearSlope(HmaShort, i, (int)adjShort, rates_total);
+      double slopeMedium = CalculateNonLinearSlope(HmaMedium, i, (int)adjMedium, rates_total);
+      double slopeLong = CalculateNonLinearSlope(HmaLong, i, (int)adjLong, rates_total);
 
-      // UKF filtering on medium-term slope
+      // UKF filtering
       TrendSlope[i] = UKFUpdate(slopeMedium);
+      SlopeVariance[i] = CalculateSlopeVariance(TrendSlope, i, 30, rates_total);
 
       // Additional features
       double consensus = CalculateCrossAssetConsensus(i, CorrelatedAssets, rates_total);
       double skewAdjustment = CalculateSkewnessAdjustment(close, i, rates_total);
-      double regime = GetCurrentRegime();
+      RegimeBuffer[i] = UpdateHMM(atr, SlopeVariance[i]);
 
       // Fuzzy logic consensus
-      CalculateFuzzyScores(slopeShort, slopeMedium, slopeLong, consensus, skewAdjustment, regime,
+      CalculateFuzzyScores(slopeShort, slopeMedium, slopeLong, consensus, skewAdjustment, RegimeBuffer[i],
                            FuzzyUp[i], FuzzyDown[i], FuzzyFlat[i]);
 
       // Color coding
-      HmaColorBuffer[i] = (FuzzyUp[i] > FuzzyDown[i] && FuzzyUp[i] > FuzzyFlat[i]) ? 0 : // Up (LimeGreen)
-                          (FuzzyDown[i] > FuzzyUp[i] && FuzzyDown[i] > FuzzyFlat[i]) ? 2 : // Down (Red)
-                          1; // Flat (Orange)
+      HmaColorBuffer[i] = (FuzzyUp[i] > FuzzyDown[i] && FuzzyUp[i] > FuzzyFlat[i]) ? 0 :
+                          (FuzzyDown[i] > FuzzyUp[i] && FuzzyDown[i] > FuzzyFlat[i]) ? 2 : 1;
 
-      // Plot signals
+      // Visualization
       if(ShowSignals && i > minBarsRequired) {
          PlotSignals(i, time[i], high[i], low[i], FuzzyUp[i], FuzzyDown[i], FuzzyFlat[i],
                      HmaMedium[i], UpArrowColor, DownArrowColor, FlatArrowColor, ArrowSize, ArrowOffsetPoints);
       }
-
-      // SHAP dashboard
       if(ShowSHAP && i > minBarsRequired && i % 5 == 0) {
          double shapValues[4];
-         CalculateSHAPValues(slopeMedium, consensus, skewAdjustment, regime, shapValues);
+         CalculateSHAPValues(slopeMedium, consensus, skewAdjustment, RegimeBuffer[i], shapValues);
          PlotSHAPChart(i, time[i], shapValues, HmaMedium[i]);
       }
    }
@@ -183,5 +185,8 @@ int OnCalculate(const int rates_total,
 
 // Deinitialization
 void OnDeinit(const int reason) {
+   if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
    ObjectsDeleteAll(0, "AMTC_");
+   DeinitUKF();
+   Print("AMTC v4 deinitialized");
 }

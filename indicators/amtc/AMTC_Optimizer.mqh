@@ -6,17 +6,16 @@
 
 // Genetic Algorithm Parameter Optimization
 void OptimizeParameters(int &shortPeriod, int &mediumPeriod, int &longPeriod) {
-   const int populationSize = 10;
-   const int generations = 5;
+   const int populationSize = 20, generations = 10;
    double population[][3], fitness[];
    ArrayResize(population, populationSize);
    ArrayResize(fitness, populationSize);
 
    // Initialize population
    for(int i = 0; i < populationSize; i++) {
-      population[i][0] = shortPeriod * (0.5 + i * 0.1);
-      population[i][1] = mediumPeriod * (0.5 + i * 0.1);
-      population[i][2] = longPeriod * (0.5 + i * 0.1);
+      population[i][0] = shortPeriod * (0.5 + i * 0.05);
+      population[i][1] = mediumPeriod * (0.5 + i * 0.05);
+      population[i][2] = longPeriod * (0.5 + i * 0.05);
    }
 
    // Evolutionary loop
@@ -27,7 +26,7 @@ void OptimizeParameters(int &shortPeriod, int &mediumPeriod, int &longPeriod) {
       }
 
       // Selection and crossover
-      double newPopulation[];
+      double newPopulation[][3];
       ArrayResize(newPopulation, populationSize);
       for(int i = 0; i < populationSize; i += 2) {
          int parent1 = SelectParent(fitness);
