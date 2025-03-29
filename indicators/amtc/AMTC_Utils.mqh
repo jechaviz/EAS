@@ -27,7 +27,17 @@ double CalculateHMA(const double &data[], int bar, int period, int total) {
 
 // Volatility-adjusted period
 double CalculateAdjustedPeriod(int basePeriod, double atr, double sensitivity) {
-   double atrAvg = iMA(NULL, 0, 50, 0, MODE_SMA, iATR(_Symbol, _Period, 14, 0), 0);
+   int atrHandle = iATR(_Symbol, _Period, 14);
+   if(atrHandle == INVALID_HANDLE) return basePeriod;
+   double atrArray[];
+   if(CopyBuffer(atrHandle, 0, 0, 50, atrArray) < 50) {
+      IndicatorRelease(atrHandle);
+      return basePeriod;
+   }
+   double atrAvg = 0.0;
+   for(int i = 0; i < 50; i++) atrAvg += atrArray[i];
+   atrAvg /= 50;
+   IndicatorRelease(atrHandle);
    if(atrAvg == 0) return basePeriod;
    double factor = (atr / atrAvg) * sensitivity;
    return MathMax(5, MathMin(basePeriod * 2, basePeriod * factor));

@@ -5,7 +5,7 @@
 #define AMTC_OPTIMIZER_MQH
 
 // Genetic Algorithm Parameter Optimization
-void OptimizeParameters(int &shortPeriod, int &mediumPeriod, int &longPeriod) {
+void OptimizeParameters(int shortPeriod, int mediumPeriod, int longPeriod) {
    const int populationSize = 20, generations = 10;
    double population[][3], fitness[];
    ArrayResize(population, populationSize);
@@ -21,8 +21,7 @@ void OptimizeParameters(int &shortPeriod, int &mediumPeriod, int &longPeriod) {
    // Evolutionary loop
    for(int gen = 0; gen < generations; gen++) {
       for(int i = 0; i < populationSize; i++) {
-         double returns = SimulateReturns(population[i][0], population[i][1], population[i][2]);
-         fitness[i] = returns / ((population[i][0] + population[i][1] + population[i][2]) * 0.01);
+         fitness[i] = SimulateReturns(population[i][0], population[i][1], population[i][2]);
       }
 
       // Selection and crossover
@@ -61,6 +60,7 @@ void OptimizeParameters(int &shortPeriod, int &mediumPeriod, int &longPeriod) {
    shortPeriod = (int)population[bestIdx][0];
    mediumPeriod = (int)population[bestIdx][1];
    longPeriod = (int)population[bestIdx][2];
+   Print("Optimized Periods: Short=", shortPeriod, ", Medium=", mediumPeriod ", Long=", longPeriod);
 }
 
 // Simulate returns for fitness evaluation

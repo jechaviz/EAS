@@ -90,9 +90,12 @@ int OnInit() {
    }
    InitUKF(UKF_ProcessNoise, UKF_MeasurementNoise);
    InitHMM();
-   OptimizeParameters(Short_Period, Medium_Period, Long_Period);
 
-   Print("Initialized AMTC v4 with optimized periods: Short=", Short_Period, ", Medium=", Medium_Period, ", Long=", Long_Period);
+   // Optimize periods (no modification of inputs)
+   int optShort = Short_Period, optMedium = Medium_Period, optLong = Long_Period;
+   OptimizeParameters(optShort, optMedium, optLong);
+   Print("Optimized periods: Short=", optShort, ", Medium=", optMedium, ", Long=", optLong);
+
    return(INIT_SUCCEEDED);
 }
 
