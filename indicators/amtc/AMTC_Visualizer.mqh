@@ -43,7 +43,8 @@ void PlotSignals(int bar, datetime time, double high, double low, double upScore
 // Plot SHAP dashboard with bars
 void PlotSHAPChart(int bar, datetime time, double &shapValues[], double hma) {
    string prefix = "AMTC_SHAP_";
-   double basePrice = hma, barWidth = PeriodSeconds() / 2;
+   double basePrice = hma;
+   datetime barWidth = (datetime)(PeriodSeconds() / 2); // Explicit cast to datetime
    for(int i = 0; i < 4; i++) {
       string name = prefix + IntegerToString(bar) + "_" + IntegerToString(i);
       if(ObjectFind(0, name) < 0) {
