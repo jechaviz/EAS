@@ -4,6 +4,8 @@
 #ifndef AMTC_OPTIMIZER_MQH
 #define AMTC_OPTIMIZER_MQH
 
+#include "AMTC_Utils.mqh" // Added to access CalculateHMA
+
 // Genetic Algorithm Parameter Optimization
 void OptimizeParameters(int shortPeriod, int mediumPeriod, int longPeriod) {
    const int populationSize = 20, generations = 10;
