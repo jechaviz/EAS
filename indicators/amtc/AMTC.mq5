@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "2025, jechaviz"
 #property link      "jechaviz@gmail.com"
-#property version   "4.00"
+#property version   "4.02"
 #property indicator_chart_window
 #property indicator_buffers 10
 #property indicator_plots   1
@@ -65,7 +65,7 @@ int OnInit() {
    // Set buffers
    SetIndexBuffer(0, HmaMedium, INDICATOR_DATA);
    SetIndexBuffer(1, HmaColorBuffer, INDICATOR_COLOR_INDEX);
-   SetIndexBuffer(2, TrendSlope, INDICATOR_DATA);
+   SetIndexBuffer(2, HmaMedium, INDICATOR_DATA);
    SetIndexBuffer(3, FuzzyUp, INDICATOR_DATA);
    SetIndexBuffer(4, FuzzyDown, INDICATOR_DATA);
    SetIndexBuffer(5, FuzzyFlat, INDICATOR_DATA);
@@ -110,7 +110,7 @@ int OnCalculate(const int rates_total,
                 const long &tick_volume[],
                 const long &volume[],
                 const int &spread[]) {
-   if(rates_total < minBarsRequired) return(0);
+   if(rates_total < 1) return(0); // Minimum check relaxed
 
    // Prepare arrays
    ArraySetAsSeries(close, true);
@@ -135,12 +135,19 @@ int OnCalculate(const int rates_total,
    }
    ArraySetAsSeries(atrArray, true);
 
-   int start = prev_calculated > 0 ? prev_calculated - 1 : minBarsRequired;
+   // Initialize TrendSlope with close prices to ensure continuity
+   for(int i = 0; i < rates_total; i++) {
+      TrendSlope[i] = close[i];
+      HmaColorBuffer[i] = 1; // Default to orange (flat)
+   }
+
+   int start = prev_calculated > 0 ? prev_calculated - 1 : 0; // Start from 0 to fill all bars
 
    for(int i = start; i < rates_total && !IsStopped(); i++) {
       // Volatility-adjusted periods
       double atr = atrArray[i];
       if(atr == 0) continue;
+
       double adjShort = CalculateAdjustedPeriod(Short_Period, atr, VolatilitySensitivity);
       double adjMedium = CalculateAdjustedPeriod(Medium_Period, atr, VolatilitySensitivity);
       double adjLong = CalculateAdjustedPeriod(Long_Period, atr, VolatilitySensitivity);
@@ -151,36 +158,44 @@ int OnCalculate(const int rates_total,
       HmaLong[i] = CalculateHMA(close, i, (int)adjLong, rates_total);
 
       // Non-linear slopes
-      double slopeShort = CalculateNonLinearSlope(HmaShort, i, (int)adjShort, rates_total);
-      double slopeMedium = CalculateNonLinearSlope(HmaMedium, i, (int)adjMedium, rates_total);
-      double slopeLong = CalculateNonLinearSlope(HmaLong, i, (int)adjLong, rates_total);
+      double slopeShort = i >= (int)adjShort ? CalculateNonLinearSlope(HmaShort, i, (int)adjShort, rates_total) : 0.0;
+      double slopeMedium = i >= (int)adjMedium ? CalculateNonLinearSlope(HmaMedium, i, (int)adjMedium, rates_total) : 0.0;
+      double slopeLong = i >= (int)adjLong ? CalculateNonLinearSlope(HmaLong, i, (int)adjLong, rates_total) : 0.0;
 
-      // UKF filtering
-      TrendSlope[i] = UKFUpdate(slopeMedium);
-      SlopeVariance[i] = CalculateSlopeVariance(TrendSlope, i, 30, rates_total);
+      // UKF-filtered slope, scaled conservatively
+      double rawSlope = i >= minBarsRequired ? UKFUpdate(slopeMedium) : 0.0;
+      TrendSlope[i] = close[i] + rawSlope * 10.0; // Reduced scaling from Medium_Period to 10 for visibility
+      SlopeVariance[i] = i >= 30 ? CalculateSlopeVariance(TrendSlope, i, 30, rates_total) : 0.0;
 
       // Additional features
-      double consensus = CalculateCrossAssetConsensus(i, CorrelatedAssets, rates_total);
-      double skewAdjustment = CalculateSkewnessAdjustment(close, i, rates_total);
-      RegimeBuffer[i] = UpdateHMM(atr, SlopeVariance[i]);
+      double consensus = i >= 30 ? CalculateCrossAssetConsensus(i, CorrelatedAssets, rates_total) : 0.0;
+      double skewAdjustment = i >= 30 ? CalculateSkewnessAdjustment(close, i, rates_total) : 0.0;
+      RegimeBuffer[i] = i >= minBarsRequired ? UpdateHMM(atr, SlopeVariance[i]) : 0.0;
 
       // Fuzzy logic consensus
-      CalculateFuzzyScores(slopeShort, slopeMedium, slopeLong, consensus, skewAdjustment, RegimeBuffer[i],
-                           FuzzyUp[i], FuzzyDown[i], FuzzyFlat[i]);
+      if(i >= minBarsRequired) {
+         CalculateFuzzyScores(slopeShort, slopeMedium, slopeLong, consensus, skewAdjustment, RegimeBuffer[i],
+                              FuzzyUp[i], FuzzyDown[i], FuzzyFlat[i]);
 
-      // Color coding
-      HmaColorBuffer[i] = (FuzzyUp[i] > FuzzyDown[i] && FuzzyUp[i] > FuzzyFlat[i]) ? 0 :
-                          (FuzzyDown[i] > FuzzyUp[i] && FuzzyDown[i] > FuzzyFlat[i]) ? 2 : 1;
-
-      // Visualization
-      if(ShowSignals && i > minBarsRequired) {
-         PlotSignals(i, time[i], high[i], low[i], FuzzyUp[i], FuzzyDown[i], FuzzyFlat[i],
-                     HmaMedium[i], UpArrowColor, DownArrowColor, FlatArrowColor, ArrowSize, ArrowOffsetPoints);
+        // Color coding
+         HmaColorBuffer[i] = (FuzzyUp[i] > FuzzyDown[i] && FuzzyUp[i] > FuzzyFlat[i]) ? 0 :
+                             (FuzzyDown[i] > FuzzyUp[i] && FuzzyDown[i] > FuzzyFlat[i]) ? 2 : 1;
       }
-      if(ShowSHAP && i > minBarsRequired && i % 5 == 0) {
+
+      // Debug output for the first few bars
+      if(i < 5) {
+         Print("Bar ", i, ": Close=", close[i], ", TrendSlope=", TrendSlope[i], ", Color=", HmaColorBuffer[i]);
+      }
+      
+      // Visualization
+      if(ShowSignals && i >= minBarsRequired) {
+         PlotSignals(i, time[i], high[i], low[i], FuzzyUp[i], FuzzyDown[i], FuzzyFlat[i],
+                     TrendSlope[i], UpArrowColor, DownArrowColor, FlatArrowColor, ArrowSize, ArrowOffsetPoints);
+      }
+      if(ShowSHAP && i >= minBarsRequired && i % 5 == 0) {
          double shapValues[4];
          CalculateSHAPValues(slopeMedium, consensus, skewAdjustment, RegimeBuffer[i], shapValues);
-         PlotSHAPChart(i, time[i], shapValues, HmaMedium[i]);
+         PlotSHAPChart(i, time[i], shapValues, TrendSlope[i]);
       }
    }
    return(rates_total);
@@ -191,5 +206,5 @@ void OnDeinit(const int reason) {
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
    ObjectsDeleteAll(0, "AMTC_");
    DeinitUKF();
-   Print("AMTC v4 deinitialized");
+   Print("AMTC v4.02 deinitialized");
 }
