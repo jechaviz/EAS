@@ -10,33 +10,33 @@
 // Indicator Plots and Buffers
 #property indicator_chart_window
 #property indicator_buffers 15 // Increased to include new color buffers
-#property indicator_plots   4
+#property indicator_plots   4  // HMA, 1 band pair, HMA over Avg
 
-// Plot 0: HMA (colored)
+// **Plot 0: HMA (colored)**
 #property indicator_type1   DRAW_COLOR_LINE
 #property indicator_color1  Gray, MediumPurple, Red
 #property indicator_style1  STYLE_SOLID
 #property indicator_width1  2
 
-// Plot 1: Recursive Upper Band (colored)
+// **Plot 1: Recursive Upper Band 1 (colored)**
 #property indicator_type2   DRAW_COLOR_LINE
 #property indicator_color2  clrDodgerBlue, clrDarkKhaki
 #property indicator_style2  STYLE_SOLID
 #property indicator_width2  2
 
-// Plot 2: Recursive Lower Band (colored)
+// **Plot 2: Recursive Lower Band 1 (colored)**
 #property indicator_type3   DRAW_COLOR_LINE
 #property indicator_color3  clrGold, clrRed
 #property indicator_style3  STYLE_SOLID
 #property indicator_width3  2
 
-// Plot 3: HMA over Average Price (colored)
+// **Plot 3: HMA over Average Price (colored)**
 #property indicator_type4   DRAW_COLOR_LINE
 #property indicator_color4  clrLime, clrDarkGreen
 #property indicator_style4  STYLE_SOLID
 #property indicator_width4  2
 
-// Input Parameters
+// **Input Parameters**
 input bool ShowHMAPlot = true;    // Show HMA
 input int HMA_Period = 13;         // Period HMA
 input int HMA_Avg_Period = 13;     // Period HMA over average price
@@ -51,7 +51,7 @@ input color DownArrowColor = clrPink;     // HMA Color arrows down
 input int ArrowSize = 1;                  // HMA Arrow width
 input double ArrowOffsetPoints = 10;      // HMA Arrow Offset in points
 
-// Indicator Buffers
+// **Indicator Buffers**
 double HmaBuffer[];       // Plot 0: HMA data
 double HmaColorBuffer[];  // Plot 0: color index for HMA
 double UpperBandBuffer[]; // Plot 1: Recursive Upper Band data
@@ -70,14 +70,16 @@ double WmaHalfAvgBuffer[];// WMA with half period for HMA over AvgBand
 double WmaFullAvgBuffer[];// WMA with full period for HMA over AvgBand
 double DiffAvgBuffer[];   // Difference for HMA over AvgBand
 
-// Global Variables
+// **Global Variables**
 int halfPeriod, halfPeriodAvg;
 int sqrtPeriod, sqrtPeriodAvg;
 double denom_half, denom_full, denom_sqrt;
 double denom_half_avg, denom_full_avg, denom_sqrt_avg;
 double sc; // Smoothing constant = 2 / (RB_Length+1)
 
-// Custom Functions
+// **Custom Functions**
+
+// Calculate Linear Weighted Moving Average (LWMA)
 double CalculateLWMA(const double &data[], int bar, int period, double denominator) {
    double sum = 0.0;
    for (int i = 0; i < period && (bar - i) >= 0; i++) {
@@ -87,8 +89,9 @@ double CalculateLWMA(const double &data[], int bar, int period, double denominat
    return (sum / denominator);
 }
 
+// Calculate Standard Deviation
 double CalcStdev(int bar, int period, const double &price[]) {
-   if (bar < period - 1) return EMPTY_VALUE;
+   if (bar < period - 1) return 0.0;
    double sum = 0.0, sumSq = 0.0;
    for (int i = 0; i < period; i++) {
       double p = price[bar - i];
@@ -157,11 +160,13 @@ int OnInit() {
    denom_full_avg = HMA_Avg_Period * (HMA_Avg_Period + 1) / 2.0;
    denom_sqrt_avg = sqrtPeriodAvg * (sqrtPeriodAvg + 1) / 2.0;
 
+   // Smoothing constant
    sc = 2.0 / (RB_Length + 1);
 
    return (INIT_SUCCEEDED);
 }
 
+// **Deinitialization**
 void OnDeinit(const int reason) {
    // Array of object name prefixes to delete
    string prefixes[] = {"UpArrow_", "DownArrow_"};
@@ -182,10 +187,12 @@ void OnDeinit(const int reason) {
    }
 }
 
+// **Main Calculation Function**
 int OnCalculate(const int rates_total, const int prev_calculated, const int begin, const double &price[]) {
    if (rates_total < MathMax(HMA_Period + sqrtPeriod - 1, RB_Length))
-      return (0);
+      return 0;
 
+   // Copy additional price data
    double highArray[], lowArray[];
    datetime Time[];
    if (CopyHigh(_Symbol, _Period, 0, rates_total, highArray) <= 0) return (0);
@@ -201,10 +208,11 @@ int OnCalculate(const int rates_total, const int prev_calculated, const int begi
    ArraySetAsSeries(WmaFullAvgBuffer, true);
    ArraySetAsSeries(DiffAvgBuffer, true);
 
+   // Determine starting point
    int start = (prev_calculated == 0 ? MathMax(HMA_Period + sqrtPeriod - 1, RB_Length) : prev_calculated - 1);
 
    for (int bar = start; bar < rates_total; bar++) {
-      // 1) HMA Calculation
+      // **1) HMA Calculation**
       if (bar >= halfPeriod - 1) {
          WmaHalfBuffer[bar] = CalculateLWMA(price, bar, halfPeriod, denom_half);
       } else {
@@ -226,11 +234,11 @@ int OnCalculate(const int rates_total, const int prev_calculated, const int begi
             HmaBuffer[bar] = hma;
             if (bar > 0 && HmaBuffer[bar - 1] != EMPTY_VALUE) {
                if (hma > HmaBuffer[bar - 1])
-                  HmaColorBuffer[bar] = 0; // Gray
+                  HmaColorBuffer[bar] = 0; // Gray (up)
                else if (hma < HmaBuffer[bar - 1])
-                  HmaColorBuffer[bar] = 2; // Red
+                  HmaColorBuffer[bar] = 2; // Red (down)
                else
-                  HmaColorBuffer[bar] = 1; // Purple
+                  HmaColorBuffer[bar] = 1; // Purple (flat)
             } else {
                HmaColorBuffer[bar] = 0;
             }
@@ -243,7 +251,7 @@ int OnCalculate(const int rates_total, const int prev_calculated, const int begi
          HmaColorBuffer[bar] = 0;
       }
 
-      // 2) Draw Arrows
+      // **2) Draw Arrows**
       if (bar > 0 && ShowArrows && ShowHMAPlot) {
          if (HmaColorBuffer[bar] == 0 && HmaColorBuffer[bar - 1] != 0) {
             string objName = "UpArrow_" + IntegerToString(bar);
@@ -308,7 +316,7 @@ int OnCalculate(const int rates_total, const int prev_calculated, const int begi
             LowerBandColorBuffer[bar] = 1; // Falling (clrRed)
       }
 
-      // 4) HMA over AvgBand Calculation
+      // **5) HMA over AvgBand (using AvgBandBuffer1)**
       if (bar >= halfPeriodAvg - 1) {
          WmaHalfAvgBuffer[bar] = CalculateLWMA(AvgBandBuffer, bar, halfPeriodAvg, denom_half_avg);
       } else {

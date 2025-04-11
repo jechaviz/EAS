@@ -107,7 +107,7 @@ double UpperBandColorBuffer2[];// Plot 4: color index for Upper Band 2
 double LowerBandBuffer2[];// Plot 5: Recursive Lower Band 2 data
 double LowerBandColorBuffer2[];// Plot 5: color index for Lower Band 2
 
-// Intermediate Buffers
+// Intermediate Buffers for Optimization
 double WmaHalfBuffer[];   // WMA with half period for HMA
 double WmaFullBuffer[];   // WMA with full period for HMA
 double DiffBuffer[];      // Difference for HMA
@@ -287,14 +287,14 @@ int OnInit() {
 
    // HMA calculations
    halfPeriod = HMA_Period / 2;
-   sqrtPeriod = (int)MathSqrt(HMA_Period);
+   sqrtPeriod = (int) MathSqrt(HMA_Period);
    denom_half = halfPeriod * (halfPeriod + 1) / 2.0;
    denom_full = HMA_Period * (HMA_Period + 1) / 2.0;
    denom_sqrt = sqrtPeriod * (sqrtPeriod + 1) / 2.0;
 
-   // HMA over average calculations
+   // HMA over average price calculations
    halfPeriodAvg = HMA_Avg_Period / 2;
-   sqrtPeriodAvg = (int)MathSqrt(HMA_Avg_Period);
+   sqrtPeriodAvg = (int) MathSqrt(HMA_Avg_Period);
    denom_half_avg = halfPeriodAvg * (halfPeriodAvg + 1) / 2.0;
    denom_full_avg = HMA_Avg_Period * (HMA_Avg_Period + 1) / 2.0;
    denom_sqrt_avg = sqrtPeriodAvg * (sqrtPeriodAvg + 1) / 2.0;
@@ -311,14 +311,20 @@ int OnInit() {
 
 // **Deinitialization**
 void OnDeinit(const int reason) {
+   // Array of object name prefixes to delete
    string prefixes[] = {"UpArrow_", "DownArrow_"};
+
+   // Loop through each prefix
    for (int p = 0; p < ArraySize(prefixes); p++) {
       string prefix = prefixes[p];
-      int obj_total = ObjectsTotal(0, 0, -1);
+      // Get total number of objects on the chart
+      int obj_total = ObjectsTotal(0, 0, -1); // Chart ID 0, main window, all object types
+      // Iterate backwards to safely delete objects
       for (int i = obj_total - 1; i >= 0; i--) {
-         string name = ObjectName(0, i, 0, -1);
+         string name = ObjectName(0, i, 0, -1); // Get object name
+         // Check if the object name starts with the prefix
          if (StringFind(name, prefix) == 0) {
-            ObjectDelete(0, name);
+            ObjectDelete(0, name); // Delete the object
          }
       }
    }
