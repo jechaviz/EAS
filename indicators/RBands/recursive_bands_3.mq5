@@ -7,7 +7,7 @@
 #property link      "jechaviz@gmail.com"
 #property version   "1.14"
 
-// Indicator Plots and Buffers
+// **Indicator Properties**
 #property indicator_chart_window
 #property indicator_buffers 15 // Increased to include new color buffers
 #property indicator_plots   4  // HMA, 1 band pair, HMA over Avg
