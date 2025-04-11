@@ -73,13 +73,14 @@ enum RB_Method {
 input RB_Method RecursiveMethod1 = RB_Classic; // Volatility method for bands 1
 input RB_Method RecursiveMethod2 = RB_ATR;     // Volatility method for bands 2
 
-// Specific lengths per method
+// Specific lengths per method for bands 1
 input int Length_ATR1 = 64;    // ATR Length for bands 1
 input int Length_Stdev1 = 306; // Stdev Length for bands 1
 input int Length_Ahlr1 = 64;   // Ahlr Length for bands 1
 input int Length_Rfv1 = 9;     // Rfv Length for bands 1
 input int Length_HMA1 = 9;     // HMA Volatility Length for bands 1
 
+// Specific lengths per method for bands 2
 input int Length_ATR2 = 14;    // ATR Length for bands 2
 input int Length_Stdev2 = 100; // Stdev Length for bands 2
 input int Length_Ahlr2 = 20;   // Ahlr Length for bands 2
